@@ -152,14 +152,17 @@ def split_audio_file(audio_path,
                      aggressiveness=3,
                      outlier_duration_ms=10000,
                      outlier_batch_size=1,
-                     exception_box=None):
-    def generate_values():
+                     exception_box=None,
+                     generate_values=None):
+    def default_generate_values():
         frames = read_frames_from_file(audio_path)
         segments = vad_split(frames, aggressiveness=aggressiveness)
         for segment in segments:
             segment_buffer, time_start, time_end = segment
             samples = pcm_to_np(segment_buffer, audio_format)
             yield time_start, time_end, samples
+
+    generate_values = generate_values or default_generate_values
 
     def to_mfccs(time_start, time_end, samples):
         features, features_len = audio_to_features(samples, audio_format.rate)

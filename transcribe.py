@@ -5,6 +5,9 @@ from __future__ import absolute_import, division, print_function
 import os
 import sys
 import json
+
+from diarization import Diarization
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import tensorflow as tf
 import tensorflow.compat.v1.logging as tflogging
@@ -27,7 +30,7 @@ def fail(message, code=1):
     sys.exit(code)
 
 
-def transcribe_file(audio_path, tlog_path):
+def transcribe_file(audio_path, tlog_path, include_speakers=False):
     from deepspeech_training.train import create_model  # pylint: disable=cyclic-import,import-outside-toplevel
     from deepspeech_training.util.checkpoints import load_graph_for_evaluation
     initialize_globals()
@@ -37,11 +40,17 @@ def transcribe_file(audio_path, tlog_path):
     except NotImplementedError:
         num_processes = 1
     with AudioFile(audio_path, as_path=True) as wav_path:
+        if include_speakers:
+            diarization = Diarization(wav_path)
+            generate_values = diarization.generate_values
+        else:
+            generate_values = None
         data_set = split_audio_file(wav_path,
                                     batch_size=FLAGS.batch_size,
                                     aggressiveness=FLAGS.vad_aggressiveness,
                                     outlier_duration_ms=FLAGS.outlier_duration_ms,
-                                    outlier_batch_size=FLAGS.outlier_batch_size)
+                                    outlier_batch_size=FLAGS.outlier_batch_size,
+                                    generate_values=generate_values)
         iterator = tf.data.Iterator.from_structure(data_set.output_types, data_set.output_shapes,
                                                    output_classes=data_set.output_classes)
         batch_time_start, batch_time_end, batch_x, batch_x_len = iterator.get_next()
@@ -65,17 +74,23 @@ def transcribe_file(audio_path, tlog_path):
                 decoded = list(d[0][1] for d in decoded)
                 transcripts.extend(zip(starts, ends, decoded))
             transcripts.sort(key=lambda t: t[0])
-            transcripts = [{'start': int(start),
-                            'end': int(end),
-                            'transcript': transcript} for start, end, transcript in transcripts]
+            transcripts = [
+                {
+                    'start': int(start),
+                    'end': int(end),
+                    'transcript': transcript,
+                } for start, end, transcript in transcripts]
+            if include_speakers:
+                for t, s in zip(transcripts, diarization.speakers):
+                    t["speaker"] = s
             with open(tlog_path, 'w') as tlog_file:
                 json.dump(transcripts, tlog_file, default=float)
 
 
-def transcribe_many(src_paths,dst_paths):
+def transcribe_many(src_paths,dst_paths, include_speakers=False):
     pbar = create_progressbar(prefix='Transcribing files | ', max_value=len(src_paths)).start()
     for i in range(len(src_paths)):
-        p = Process(target=transcribe_file, args=(src_paths[i], dst_paths[i]))
+        p = Process(target=transcribe_file, args=(src_paths[i], dst_paths[i], include_speakers))
         p.start()
         p.join()
         log_progress('Transcribed file {} of {} from "{}" to "{}"'.format(i + 1, len(src_paths), src_paths[i], dst_paths[i]))
@@ -83,8 +98,8 @@ def transcribe_many(src_paths,dst_paths):
     pbar.finish()
 
 
-def transcribe_one(src_path, dst_path):
-    transcribe_file(src_path, dst_path)
+def transcribe_one(src_path, dst_path, include_speakers=False):
+    transcribe_file(src_path, dst_path, include_speakers=include_speakers)
     log_info('Transcribed file "{}" to "{}"'.format(src_path, dst_path))
 
 
@@ -119,17 +134,17 @@ def main(_):
                 if any(map(lambda e: not os.path.isdir(os.path.dirname(e[1])), catalog_entries)):
                     fail('Missing destination directory for at least one catalog entry')
                 src_paths,dst_paths = zip(*paths)
-                transcribe_many(src_paths,dst_paths)
+                transcribe_many(src_paths,dst_paths, include_speakers=FLAGS.include_speakers)
             else:
                 # Transcribe one file
                 dst_path = os.path.abspath(FLAGS.dst) if FLAGS.dst else os.path.splitext(src_path)[0] + '.tlog'
                 if os.path.isfile(dst_path):
                     if FLAGS.force:
-                        transcribe_one(src_path, dst_path)
+                        transcribe_one(src_path, dst_path, include_speakers=FLAGS.include_speakers)
                     else:
                         fail('Destination file "{}" already existing - use --force for overwriting'.format(dst_path), code=0)
                 elif os.path.isdir(os.path.dirname(dst_path)):
-                    transcribe_one(src_path, dst_path)
+                    transcribe_one(src_path, dst_path, include_speakers=FLAGS.include_speakers)
                 else:
                     fail('Missing destination directory')
         elif os.path.isdir(src_path):
@@ -144,7 +159,7 @@ def main(_):
                 else:
                     wav_paths = glob.glob(src_path + "/**/*.wav")
                 dst_paths = [path.replace('.wav','.tlog') for path in wav_paths]
-                transcribe_many(wav_paths,dst_paths)
+                transcribe_many(wav_paths,dst_paths, include_speakers = FLAGS.include_speakers)
 
 
 if __name__ == '__main__':
@@ -165,4 +180,5 @@ if __name__ == '__main__':
     tf.app.flags.DEFINE_integer('batch_size', 40, 'Default batch size')
     tf.app.flags.DEFINE_float('outlier_duration_ms', 10000, 'Duration in ms after which samples are considered outliers')
     tf.app.flags.DEFINE_integer('outlier_batch_size', 1, 'Batch size for duration outliers (defaults to 1)')
+    tf.app.flags.DEFINE_boolean('include_speakers', False, 'Include speaker diarization')
     tf.app.run(main)
